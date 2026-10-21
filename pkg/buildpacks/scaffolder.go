@@ -7,11 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	fn "knative.dev/func/pkg/functions"
 	"knative.dev/func/pkg/scaffolding"
 )
 
 const defaultPath = fn.RunDataDir + "/" + fn.BuildDir
+
+// Used for default `requires-python` when patching template pyproject.toml
+const defaultRequiresPython = ">=3.10"
 
 // Scaffolder for buildpacks builder
 type Scaffolder struct {
@@ -74,7 +78,10 @@ func (s Scaffolder) Scaffold(ctx context.Context, f fn.Function, path string) er
 	// detection as pre-buildpack runs only at build phase.
 	// Variable BP_PROCFILE_DEFAULT_PROCESS (see builder.go) is used for detection
 	// for local deployment.
-	if err = patchPyprojectForPack(filepath.Join(appRoot, "pyproject.toml")); err != nil {
+	if err = patchPyprojectForPack(
+		filepath.Join(appRoot, "pyproject.toml"),
+		filepath.Join(f.Root, "pyproject.toml"),
+	); err != nil {
 		return err
 	}
 	return os.WriteFile(
@@ -91,13 +98,30 @@ func (s Scaffolder) Scaffold(ctx context.Context, f fn.Function, path string) er
 //     f -> fn/ so ./f resolves correctly.
 //   - Appends [tool.poetry.dependencies] — Poetry needs this section for
 //     dependency solving
-func patchPyprojectForPack(pyprojectPath string) error {
+func patchPyprojectForPack(pyprojectPath, funcPyprojectPath string) error {
 	data, err := os.ReadFile(pyprojectPath)
 	if err != nil {
 		return fmt.Errorf("cannot read pyproject.toml for patching: %w", err)
 	}
+
+	type pyprojectMetadata struct {
+		Project struct {
+			RequiresPython string `toml:"requires-python"`
+		} `toml:"project"`
+	}
+	var funcPyproject pyprojectMetadata
+
+	// Use pyproject.toml's `requires-python` value where available, otherwise
+	// fallback to `defaultRequiresPython`
+	if _, err = toml.DecodeFile(funcPyprojectPath, &funcPyproject); err != nil || funcPyproject.Project.RequiresPython == "" {
+		funcPyproject.Project.RequiresPython = defaultRequiresPython
+	}
+
 	content := strings.Replace(string(data), "{root:uri}/f", "./f", 1)
-	content += "[tool.poetry.dependencies]\npython = \">=3.10,<4.0\"\nfunction = { path = \"f\", develop = true }\n"
+	content += fmt.Sprintf(
+		"[tool.poetry.dependencies]\npython = %q\nfunction = { path = \"f\", develop = true }\n",
+		funcPyproject.Project.RequiresPython,
+	)
 	if err = os.WriteFile(pyprojectPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("cannot write patched pyproject.toml: %w", err)
 	}

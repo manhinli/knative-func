@@ -10,12 +10,22 @@ import (
 	. "knative.dev/func/pkg/testing"
 )
 
+const functionPyproject = "[project]\nrequires-python = \">=3.12,<4.0\"\n"
+
+func writeFunctionPyproject(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte(functionPyproject), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestScaffoldPython_LocalBuild ensures that Scaffold writes scaffolding
 // to .func/build/ when path is empty (local pack builds). User files at
 // the function root must not be moved or modified.
 func TestScaffoldPython_LocalBuild(t *testing.T) {
 	root, done := Mktemp(t)
 	defer done()
+	writeFunctionPyproject(t, root)
 
 	// Create a user file that should NOT be moved
 	if err := os.WriteFile(filepath.Join(root, "func.py"), []byte("def handle(): pass"), 0644); err != nil {
@@ -38,8 +48,12 @@ func TestScaffoldPython_LocalBuild(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "Procfile")); !os.IsNotExist(err) {
 		t.Error("Procfile should not exist at root after local scaffold")
 	}
-	if _, err := os.Stat(filepath.Join(root, "pyproject.toml")); !os.IsNotExist(err) {
-		t.Error("pyproject.toml should not exist at root after local scaffold")
+	pyproject, err := os.ReadFile(filepath.Join(root, "pyproject.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pyproject) != functionPyproject {
+		t.Error("function pyproject.toml should remain unchanged after local scaffold")
 	}
 
 	// Scaffolding files should exist in .func/build/
@@ -56,6 +70,7 @@ func TestScaffoldPython_LocalBuild(t *testing.T) {
 func TestScaffoldPython_ScaffoldingContent(t *testing.T) {
 	root, done := Mktemp(t)
 	defer done()
+	writeFunctionPyproject(t, root)
 
 	s := NewScaffolder(false)
 	f := fn.Function{Root: root, Runtime: "python", Invoke: "http"}
@@ -82,6 +97,12 @@ func TestScaffoldPython_ScaffoldingContent(t *testing.T) {
 	if !strings.Contains(text, "[tool.poetry.dependencies]") {
 		t.Error("pyproject.toml should contain [tool.poetry.dependencies] for pack builds")
 	}
+	if !strings.Contains(text, `requires-python = ">=3.10"`) {
+		t.Error("pyproject.toml should preserve the template's project.requires-python")
+	}
+	if !strings.Contains(text, "[tool.poetry.dependencies]\npython = \">=3.12,<4.0\"") {
+		t.Error("Poetry dependency constraint should copy requires-python from the function project")
+	}
 
 	// Procfile: module invocation
 	procfile, err := os.ReadFile(filepath.Join(outDir, "Procfile"))
@@ -90,6 +111,30 @@ func TestScaffoldPython_ScaffoldingContent(t *testing.T) {
 	}
 	if !strings.Contains(string(procfile), "python -m service.main") {
 		t.Errorf("Procfile should use 'python -m service.main', got: %s", procfile)
+	}
+}
+
+func TestPatchPyprojectForPack_DefaultsOnDecodeError(t *testing.T) {
+	dir := t.TempDir()
+	pyprojectPath := filepath.Join(dir, "scaffold-pyproject.toml")
+	functionPyprojectPath := filepath.Join(dir, "function-pyproject.toml")
+	if err := os.WriteFile(pyprojectPath, []byte("[project]\nname = \"scaffold\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(functionPyprojectPath, []byte("[project\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := patchPyprojectForPack(pyprojectPath, functionPyprojectPath); err != nil {
+		t.Fatal(err)
+	}
+
+	patched, err := os.ReadFile(pyprojectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(patched), "[tool.poetry.dependencies]\npython = \">=3.10\"") {
+		t.Errorf("Poetry dependency should default to >=3.10, got:\n%s", patched)
 	}
 }
 
